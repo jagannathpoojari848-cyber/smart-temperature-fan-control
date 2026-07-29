@@ -1,0 +1,117 @@
+/*
+  Temperature Based Fan Speed Control
+  ------------------------------------
+  Board       : ESP32
+  Sensor      : DHT11 / DHT22
+  Motor Driver: L298N
+
+
+   Description:
+  Reads ambient temperature using a DHT11/DHT22 sensor and controls a DC fan
+  through an L298N motor driver. The fan stays OFF below a set temperature,
+  and its speed increases proportionally (via PWM) as temperature rises --
+  slow near the low threshold, gradually faster as it gets hotter, and full
+  speed once it hits the high threshold.
+
+  Wiring:
+    DHT DATA  -> GPIO 4
+    L298N ENA -> GPIO 5   (PWM speed control)
+    L298N IN1 -> GPIO 18
+    L298N IN2 -> GPIO 19
+
+  Library required (install via Arduino Library Manager):
+    - DHT sensor library (by Adafruit)
+    - Adafruit Unified Sensor (dependency of the above)
+*/
+
+#include <DHT.h>
+
+// ---------------- USER CONFIG ----------------
+#define DHTPIN      4          // DHT data pin
+#define DHTTYPE     DHT22      // change to DHT11 if that's what you used
+
+#define ENA_PIN     5          // PWM pin to L298N ENA
+#define IN1_PIN     18         // L298N IN1
+#define IN2_PIN     19         // L298N IN2
+
+#define TEMP_LOW    25.0       // below this, fan is OFF (deg C)
+#define TEMP_HIGH   35.0       // at/above this, fan runs at full speed (deg C)
+
+#define PWM_MIN     120        // slowest speed once fan turns on (just above TEMP_LOW)
+#define PWM_MAX     255        // full speed once temp reaches TEMP_HIGH
+
+// ESP32 LEDC PWM settings
+#define PWM_CHANNEL 0
+#define PWM_FREQ    5000
+#define PWM_RES     8          // 8-bit -> 0-255
+
+#define SERIAL_BAUD 115200
+#define READ_INTERVAL_MS 2000
+// ----------------------------------------------
+
+DHT dht(DHTPIN, DHTTYPE);
+
+unsigned long lastReadTime = 0;
+
+void setup() {
+  Serial.begin(SERIAL_BAUD);
+  dht.begin();
+
+  pinMode(IN1_PIN, OUTPUT);
+  pinMode(IN2_PIN, OUTPUT);
+
+  // Fan spins in one direction only
+  digitalWrite(IN1_PIN, HIGH);
+  digitalWrite(IN2_PIN, LOW);
+
+  // Setup PWM on ENA pin (ESP32 LEDC)
+  ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RES);
+  ledcAttachPin(ENA_PIN, PWM_CHANNEL);
+  ledcWrite(PWM_CHANNEL, 0);
+
+  Serial.println("Temperature Based Fan Control - Starting...");
+}
+
+void loop() {
+  if (millis() - lastReadTime >= READ_INTERVAL_MS) {
+    lastReadTime = millis();
+
+    float temperature = dht.readTemperature();
+
+    if (isnan(temperature)) {
+      Serial.println("Failed to read from DHT sensor!");
+      return;
+    }
+
+    int pwmValue = calculateFanSpeed(temperature);
+    ledcWrite(PWM_CHANNEL, pwmValue);
+
+    Serial.print("Temperature: ");
+    Serial.print(temperature);
+    Serial.print(" C  |  Fan PWM: ");
+    Serial.print(pwmValue);
+    Serial.print(" (");
+    Serial.print((pwmValue * 100) / PWM_MAX);
+    Serial.println("%)");
+  }
+}
+
+// Maps temperature to a PWM value.
+// - Below TEMP_LOW  -> fan OFF (0)
+// - Above TEMP_HIGH -> fan at PWM_MAX (full speed)
+// - In between       -> proportional speed: slow near TEMP_LOW, increasing
+//                        smoothly up to PWM_MAX as temperature rises to TEMP_HIGH
+int calculateFanSpeed(float tempC) {
+  if (tempC <= TEMP_LOW) {
+    return 0;
+  }
+  if (tempC >= TEMP_HIGH) {
+    return PWM_MAX;
+  }
+
+  // Linear interpolation between TEMP_LOW->PWM_MIN and TEMP_HIGH->PWM_MAX
+  float ratio = (tempC - TEMP_LOW) / (TEMP_HIGH - TEMP_LOW);
+  int pwmValue = PWM_MIN + (int)(ratio * (PWM_MAX - PWM_MIN));
+
+  return constrain(pwmValue, PWM_MIN, PWM_MAX);
+}
